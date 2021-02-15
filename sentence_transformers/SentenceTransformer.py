@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+from contextlib import nullcontext
 from collections import OrderedDict
 from typing import List, Dict, Tuple, Iterable, Type, Union, Callable
 from zipfile import ZipFile
@@ -133,7 +134,8 @@ class SentenceTransformer(nn.Sequential):
                convert_to_tensor: bool = False,
                is_pretokenized: bool = False,
                device: str = None,
-               num_workers: int = 0) -> Union[List[Tensor], ndarray, Tensor]:
+               num_workers: int = 0,
+               train_mode: bool = False) -> Union[List[Tensor], ndarray, Tensor]:
         """
         Computes sentence embeddings
         :param sentences: the sentences to embed
@@ -144,18 +146,13 @@ class SentenceTransformer(nn.Sequential):
         :param convert_to_tensor: If true, you get one large tensor as return. Overwrites any setting from convert_to_numpy
         :param is_pretokenized: If is_pretokenized=True, sentences must be a list of integers, containing the tokenized sentences with each token convert to the respective int.
         :param device: Which torch.device to use for the computation
-        :param num_workers: Number of background-workers to tokenize data. Set to positive number to increase tokenization speed
+        :param num_workers: DEPRECATED - No longer used, will be removed in the future
+        :param train_mode: if true, sets the mode to train and enables gradient computation
+
         :return:
            By default, a list of tensors is returned. If convert_to_tensor, a stacked tensor is returned. If convert_to_numpy, a numpy matrix is returned.
         """
-        self.eval()
-        if show_progress_bar is None:
-            show_progress_bar = (logging.getLogger().getEffectiveLevel()==logging.INFO or logging.getLogger().getEffectiveLevel()==logging.DEBUG)
-
-        input_was_string = False
-        if isinstance(sentences, str): #Cast an individual sentence to a list with length 1
-            sentences = [sentences]
-            input_was_string = True
+        self.train()
 
         if device is None:
             device = self._target_device
@@ -169,42 +166,25 @@ class SentenceTransformer(nn.Sequential):
         inp_dataloader = DataLoader(inp_dataset, batch_size=batch_size, collate_fn=self.smart_batching_collate_text_only, num_workers=num_workers, shuffle=False)
 
         iterator = inp_dataloader
-        if show_progress_bar:
-            iterator = tqdm(inp_dataloader, desc="Batches")
 
         for features in iterator:
             for feature_name in features:
                 features[feature_name] = features[feature_name].to(device)
 
-            with torch.no_grad():
-                out_features = self.forward(features)
-                embeddings = out_features[output_value]
+            out_features = self.forward(features)
+            embeddings = out_features[output_value]
 
-                if output_value == 'token_embeddings':
-                    #Set token embeddings to 0 for padding tokens
-                    input_mask = out_features['attention_mask']
-                    input_mask_expanded = input_mask.unsqueeze(-1).expand(embeddings.size()).float()
-                    embeddings = embeddings * input_mask_expanded
+            if output_value == 'token_embeddings':
+                #Set token embeddings to 0 for padding tokens
+                input_mask = out_features['attention_mask']
+                input_mask_expanded = input_mask.unsqueeze(-1).expand(embeddings.size()).float()
+                embeddings = embeddings * input_mask_expanded
 
-                embeddings = embeddings.detach()
-
-                # fixes for #522 and #487
-                # to avoid oom problems on gpu with large datasets
-                if convert_to_numpy:
-                    embeddings = embeddings.cpu()
-
-                all_embeddings.extend(embeddings)
+            all_embeddings.extend(embeddings)
 
         all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 
-        if convert_to_tensor:
-            all_embeddings = torch.stack(all_embeddings)
-        elif convert_to_numpy:
-            all_embeddings = np.asarray([emb.numpy() for emb in all_embeddings])
-
-        if input_was_string:
-            all_embeddings = all_embeddings[0]
-
+        all_embeddings = torch.stack(all_embeddings)
         return all_embeddings
 
 
